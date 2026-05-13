@@ -16,6 +16,7 @@ export default function App() {
   const [activePattern, setActivePattern] = useState("00000000");
   const [allOn, setAllOn]           = useState(false);
   const [onCount, setOnCount]       = useState(0);
+  const [apMode, setApMode]         = useState(false);
 
   // Controls
   const [ledColor, setLedColor]     = useState("#ffffff");
@@ -71,6 +72,7 @@ export default function App() {
         }
         if (data.allOn !== undefined) setAllOn(data.allOn);
         if (data.onCount !== undefined) setOnCount(data.onCount);
+        if (data.apMode !== undefined) setApMode(data.apMode);
         if (data.r !== undefined) {
           const hex = `#${data.r.toString(16).padStart(2,"0")}${data.g.toString(16).padStart(2,"0")}${data.b.toString(16).padStart(2,"0")}`;
           if (hex !== "#000000") setLedColor(hex);
@@ -291,7 +293,9 @@ export default function App() {
         </div>
         <div className={`conn-badge ${connected ? "conn-ok" : "conn-err"}`}>
           <span className="conn-dot" />
-          {connected ? `ESP32 Connected · ${onCount}/8 LEDs` : "ESP32 Disconnected"}
+          {connected
+            ? `ESP32 Connected · ${onCount}/8 LEDs${apMode ? " · 📡 AP Mode" : ""}`
+            : "ESP32 Disconnected"}
         </div>
       </header>
 
