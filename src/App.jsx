@@ -1,27 +1,27 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import "./App.css";
 
-const ESP32_IP = "192.168.1.7";
+const ESP32_IP = "192.168.1.6";
 const API      = `http://${ESP32_IP}`;
 const NUM_LEDS = 8;
 
 export default function App() {
-  // Bağlantı
+  // Connection
   const [connected, setConnected]   = useState(false);
   const [lastUpdate, setLastUpdate] = useState(null);
 
-  // LED ve switch durumu (ESP32'den geliyor)
+  // LED and switch state (from ESP32)
   const [ledStates, setLedStates]   = useState(Array(NUM_LEDS).fill(false));
   const [swStates, setSwStates]     = useState(Array(NUM_LEDS).fill(false));
   const [activePattern, setActivePattern] = useState("00000000");
   const [allOn, setAllOn]           = useState(false);
   const [onCount, setOnCount]       = useState(0);
 
-  // Kontroller
+  // Controls
   const [ledColor, setLedColor]     = useState("#ffffff");
   const [brightness, setBrightness] = useState(128);
 
-  // Pattern editörü
+  // Pattern editor
   const [bitInput, setBitInput]       = useState("00000000");
   const [bitSending, setBitSending]   = useState(false);
   const [bitFeedback, setBitFeedback] = useState(null);
@@ -31,15 +31,16 @@ export default function App() {
   const [serverLog, setServerLog] = useState("");
   const [logTab, setLogTab]       = useState("ui");
 
-  const pollRef    = useRef(null);
-  const logPollRef = useRef(null);
+  const pollRef     = useRef(null);
+  const logPollRef  = useRef(null);
+  const fileInputRef = useRef(null);
 
   const addLog = useCallback((msg) => {
     const t = new Date().toLocaleTimeString();
     setUiLogs((p) => [`[${t}] ${msg}`, ...p].slice(0, 80));
   }, []);
 
-  // ── /status her saniye ────────────────────────────────────────────────────
+  // ── /status every second ─────────────────────────────────────────────────
   useEffect(() => {
     const poll = async () => {
       try {
@@ -52,7 +53,14 @@ export default function App() {
         if (Array.isArray(data.switches)) {
           setSwStates((prev) => {
             data.switches.forEach((sw, i) => {
-              if (sw !== prev[i]) addLog(`SW${i+1} ${sw ? "basıldı" : "bırakıldı"}`);
+              if (sw !== prev[i]) {
+                if (sw) {
+                  const ledOn = Array.isArray(data.leds) ? data.leds[i] : false;
+                  addLog(`[Input] SW${i+1} pressed  |  [Output] LED${i+1} ${ledOn ? "ON" : "OFF"}`);
+                } else {
+                  addLog(`[Input] SW${i+1} released  |  [Output] LED${i+1} ${"OFF"}`);
+                }
+              }
             });
             return data.switches;
           });
@@ -77,20 +85,20 @@ export default function App() {
     return () => clearInterval(pollRef.current);
   }, [addLog]);
 
-  // ── ESP32 log 5 saniyede bir ──────────────────────────────────────────────
+  // ── ESP32 log every 5 seconds ────────────────────────────────────────────
   useEffect(() => {
     const fetchLog = async () => {
       try {
         const res = await fetch(`${API}/log`, { signal: AbortSignal.timeout(3000) });
         setServerLog(await res.text());
-      } catch { /* sessiz */ }
+      } catch { /* silent */ }
     };
     fetchLog();
     logPollRef.current = setInterval(fetchLog, 5000);
     return () => clearInterval(logPollRef.current);
   }, []);
 
-  // ── Renk / Parlaklık / Aç-Kapat ──────────────────────────────────────────
+  // ── Color / Brightness / Toggle All ──────────────────────────────────────
   const hexToRgb = (h) => ({
     r: parseInt(h.slice(1,3),16),
     g: parseInt(h.slice(3,5),16),
@@ -101,8 +109,8 @@ export default function App() {
     const { r, g, b } = hexToRgb(hex);
     try {
       await fetch(`${API}/color?r=${r}&g=${g}&b=${b}`);
-      addLog(`Renk → R:${r} G:${g} B:${b}`);
-    } catch { addLog("Bağlanamadı!"); }
+      addLog(`Color → R:${r} G:${g} B:${b}`);
+    } catch { addLog("Connection failed!"); }
   };
 
   const handleColorChange = (e) => {
@@ -113,8 +121,8 @@ export default function App() {
   const sendBrightness = async (val) => {
     try {
       await fetch(`${API}/brightness?value=${val}`);
-      addLog(`Parlaklık: %${Math.round(val/2.55)}`);
-    } catch { addLog("Bağlanamadı!"); }
+      addLog(`Brightness: ${Math.round(val/2.55)}%`);
+    } catch { addLog("Connection failed!"); }
   };
 
   const handleBrightness = (e) => {
@@ -127,18 +135,36 @@ export default function App() {
     const endpoint = allOn ? "/off" : "/on";
     try {
       await fetch(`${API}${endpoint}`);
-      addLog(allOn ? "Tüm LEDler KAPATILDI" : "Tüm LEDler AÇILDI");
-    } catch { addLog("Bağlanamadı!"); }
+      addLog(allOn ? "All LEDs OFF" : "All LEDs ON");
+    } catch { addLog("Connection failed!"); }
   };
 
   const sendEffect = async (type) => {
     try {
       await fetch(`${API}/effect?type=${type}`);
-      addLog(`Efekt → ${type}`);
-    } catch { addLog("Bağlanamadı!"); }
+      addLog(`Effect → ${type}`);
+    } catch { addLog("Connection failed!"); }
   };
 
-  // ── Pattern editörü ───────────────────────────────────────────────────────
+  // ── Toggle individual LED (from Switch Status card) ───────────────────────
+  const toggleLed = async (i) => {
+    const arr = activePattern.split("");
+    arr[i] = arr[i] === "1" ? "0" : "1";
+    const newPattern = arr.join("");
+    try {
+      const res = await fetch(`${API}/8bit`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: newPattern,
+      });
+      const data = await res.json();
+      if (data.status === "ok") {
+        addLog(`[Manual] LED${i+1} toggled → ${arr[i] === "1" ? "ON" : "OFF"}`);
+      }
+    } catch { addLog("Connection failed!"); }
+  };
+
+  // ── Pattern editor ────────────────────────────────────────────────────────
   const toggleBit = (i) => {
     setBitInput((p) => {
       const arr = p.split("");
@@ -164,30 +190,57 @@ export default function App() {
       });
       const data = await res.json();
       if (data.status === "ok") {
-        setBitFeedback({ ok: true, msg: `Uygulandı: ${data.on}/8 LED açık` });
-        addLog(`Pattern gönderildi: ${data.pattern} (${data.on}/8)`);
+        setBitFeedback({ ok: true, msg: `Applied: ${data.on}/8 LEDs on` });
+        addLog(`Pattern sent: ${data.pattern} (${data.on}/8 on)`);
       }
     } catch {
-      setBitFeedback({ ok: false, msg: "ESP32'ye bağlanılamadı!" });
+      setBitFeedback({ ok: false, msg: "Failed to connect to ESP32!" });
     } finally { setBitSending(false); }
   };
 
-  const loadPattern = async () => {
-    try {
-      const res  = await fetch(`${API}/8bit`);
-      const data = await res.json();
-      setBitInput(data.pattern.padEnd(NUM_LEDS,"0"));
-      addLog(`Pattern yüklendi: ${data.pattern} (${data.exists ? "dosyadan" : "varsayılan"})`);
-    } catch { addLog("Pattern yüklenemedi!"); }
+  // ── Load pattern from .txt file ───────────────────────────────────────────
+  const handleFileLoad = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const content = evt.target.result.trim();
+      const clean = content.replace(/[^01]/g, "").slice(0, NUM_LEDS).padEnd(NUM_LEDS, "0");
+      setBitInput(clean);
+      setBitFeedback({ ok: true, msg: `Loaded from file: ${clean}` });
+      addLog(`Pattern loaded from file: ${clean}`);
+    };
+    reader.readAsText(file);
+    e.target.value = ""; // reset so same file can be re-selected
   };
 
-  // ── Log işlemleri ─────────────────────────────────────────────────────────
+  // ── Reset pattern (sends 00000000 to ESP32) ───────────────────────────────
+  const resetPattern = async () => {
+    setBitInput("00000000");
+    setBitFeedback(null);
+    try {
+      const res = await fetch(`${API}/8bit`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: "00000000",
+      });
+      const data = await res.json();
+      if (data.status === "ok") {
+        setBitFeedback({ ok: true, msg: "Reset: all LEDs off" });
+        addLog("Pattern reset: all LEDs off");
+      }
+    } catch {
+      setBitFeedback({ ok: false, msg: "Failed to connect to ESP32!" });
+    }
+  };
+
+  // ── Log actions ───────────────────────────────────────────────────────────
   const clearServerLog = async () => {
     try {
       await fetch(`${API}/clearlog`);
       setServerLog("");
-      addLog("ESP32 log temizlendi");
-    } catch { addLog("Log temizlenemedi!"); }
+      addLog("ESP32 log cleared");
+    } catch { addLog("Failed to clear log!"); }
   };
 
   const dlText = (text, name) => {
@@ -200,16 +253,23 @@ export default function App() {
     try {
       const text = await (await fetch(`${API}/log`)).text();
       dlText(text, `esp32-log-${new Date().toISOString().slice(0,10)}.txt`);
-      addLog("Log indirildi");
-    } catch { addLog("Log indirilemedi!"); }
+      addLog("Log downloaded");
+    } catch { addLog("Failed to download log!"); }
+  };
+
+  const downloadUiLog = () => {
+    if (uiLogs.length === 0) return;
+    const text = [...uiLogs].reverse().join("\n");
+    dlText(text, `ui-log-${new Date().toISOString().slice(0,10)}.txt`);
+    addLog("UI log downloaded");
   };
 
   const downloadPattern = () => {
     dlText(bitInput, "8bit.txt");
-    addLog("8bit.txt indirildi");
+    addLog("8bit.txt downloaded");
   };
 
-  // ── Hesaplamalar ──────────────────────────────────────────────────────────
+  // ── Calculations ──────────────────────────────────────────────────────────
   const bitOnCount = bitInput.split("").filter(c => c === "1").length;
   const bitDecimal = parseInt(bitInput, 2);
 
@@ -231,19 +291,27 @@ export default function App() {
         </div>
         <div className={`conn-badge ${connected ? "conn-ok" : "conn-err"}`}>
           <span className="conn-dot" />
-          {connected ? `ESP32 Bağlı · ${onCount}/8 LED` : "ESP32 Bağlantı Yok"}
+          {connected ? `ESP32 Connected · ${onCount}/8 LEDs` : "ESP32 Disconnected"}
         </div>
       </header>
 
       <main className="grid">
 
-        {/* ── SWITCH DURUMU ─────────────────────────────────────────────── */}
+        {/* ── SWITCH STATUS ─────────────────────────────────────────────── */}
         <div className="card sw-card">
-          <div className="card-label">8 SWITCH DURUMU</div>
+          <div className="card-label">8 SWITCH STATUS</div>
           <div className="sw-grid">
             {swStates.map((on, i) => (
               <div key={i} className={`sw-item ${on ? "sw-active" : ""}`}>
-                <div className="sw-led-dot" style={ledStates[i] ? {background: ledColor, boxShadow: `0 0 8px ${ledColor}`} : {}} />
+                <div
+                  className="sw-led-dot"
+                  style={{
+                    ...(ledStates[i] ? { background: ledColor, boxShadow: `0 0 8px ${ledColor}` } : {}),
+                    cursor: "pointer",
+                  }}
+                  title={`Click to toggle LED${i+1}`}
+                  onClick={() => toggleLed(i)}
+                />
                 <div className={`sw-badge ${on ? "sw-badge-on" : "sw-badge-off"}`}>
                   {on ? "ON" : "OFF"}
                 </div>
@@ -251,14 +319,14 @@ export default function App() {
               </div>
             ))}
           </div>
-          {lastUpdate && <div className="update-time">Son güncelleme: {lastUpdate}</div>}
+          {lastUpdate && <div className="update-time">Last update: {lastUpdate}</div>}
         </div>
 
-        {/* ── LED KONTROLÜ ──────────────────────────────────────────────── */}
+        {/* ── LED CONTROL ───────────────────────────────────────────────── */}
         <div className="card led-card">
-          <div className="card-label">LED KONTROLÜ</div>
+          <div className="card-label">LED CONTROL</div>
 
-          {/* 8 LED canlı görüntü */}
+          {/* 8 LED live view */}
           <div className="led8-row">
             {ledStates.map((on, i) => (
               <div key={i} className="led8-col">
@@ -274,11 +342,11 @@ export default function App() {
           </div>
 
           <button className={`toggle-btn ${allOn ? "btn-on" : "btn-off"}`} onClick={toggleAll}>
-            {allOn ? "TÜMÜNÜ KAPAT" : "TÜMÜNÜ AÇ"}
+            {allOn ? "TURN ALL OFF" : "TURN ALL ON"}
           </button>
 
           <div className="control-row">
-            <label>Renk</label>
+            <label>Color</label>
             <div style={{display:"flex", gap:8, alignItems:"center"}}>
               <input type="color" value={ledColor} onChange={handleColorChange} className="color-input" />
               <div className="presets">
@@ -294,12 +362,12 @@ export default function App() {
           </div>
 
           <div className="control-row">
-            <label>Parlaklık <span>{Math.round(brightness/2.55)}%</span></label>
+            <label>Brightness <span>{Math.round(brightness/2.55)}%</span></label>
             <input type="range" min="0" max="255" value={brightness}
               onChange={handleBrightness} className="slider" />
           </div>
 
-          <div className="card-label" style={{marginTop:12}}>EFEKTLER</div>
+          <div className="card-label" style={{marginTop:12}}>EFFECTS</div>
           <div className="effects-row">
             {["rainbow","breathe","chase"].map((e) => (
               <button key={e} className="effect-btn" onClick={() => sendEffect(e)}>
@@ -309,17 +377,17 @@ export default function App() {
           </div>
         </div>
 
-        {/* ── 8-BIT PATTERN KART ────────────────────────────────────────── */}
+        {/* ── 8-BIT PATTERN CARD ────────────────────────────────────────── */}
         <div className="card pattern-card">
           <div className="card-label">
             8-BIT PATTERN — 8BIT.TXT &nbsp;
-            <span style={{color:"var(--accent)"}}>aktif: </span>
+            <span style={{color:"var(--accent)"}}>active: </span>
             <code style={{color:"var(--warn)", letterSpacing:4}}>{activePattern}</code>
             <span style={{color:"var(--text2)", marginLeft:8}}>= {parseInt(activePattern,2)} (dec)</span>
           </div>
 
           <div className="bit-body">
-            {/* Toggle butonlar */}
+            {/* Toggle buttons */}
             <div className="bit-editor">
               <div className="bit-toggles-row">
                 {Array(NUM_LEDS).fill(null).map((_,i) => (
@@ -332,7 +400,6 @@ export default function App() {
                     >
                       {bitInput[i]||"0"}
                     </button>
-                    {/* Referans: hangi switch bağlı */}
                     <span className="bit-sw-ref">SW{i+1}</span>
                   </div>
                 ))}
@@ -349,25 +416,35 @@ export default function App() {
                 />
                 <span className="bit-decimal">=&nbsp;{bitDecimal}&nbsp;(dec)</span>
                 <span className="bit-count">
-                  <span style={{color:"var(--accent)"}}>{bitOnCount}</span>/8 açık
+                  <span style={{color:"var(--accent)"}}>{bitOnCount}</span>/8 on
                 </span>
               </div>
 
               <div className="pattern-actions" style={{marginTop:12}}>
                 <button className="pattern-btn pattern-send"
                   onClick={sendPattern} disabled={bitSending || !connected}>
-                  {bitSending ? "Gönderiliyor..." : "ESP32'ye Gönder"}
+                  {bitSending ? "Sending..." : "Send to ESP32"}
                 </button>
+
+                {/* Hidden file input */}
+                <input
+                  type="file"
+                  accept=".txt"
+                  ref={fileInputRef}
+                  style={{display:"none"}}
+                  onChange={handleFileLoad}
+                />
                 <button className="pattern-btn pattern-load"
-                  onClick={loadPattern} disabled={!connected}>
-                  Dosyadan Yükle
+                  onClick={() => fileInputRef.current.click()}>
+                  📂 Load from File
                 </button>
+
                 <button className="pattern-btn pattern-dl" onClick={downloadPattern}>
-                  ⬇ 8bit.txt İndir
+                  ⬇ Download 8bit.txt
                 </button>
                 <button className="pattern-btn pattern-clear"
-                  onClick={() => { setBitInput("00000000"); setBitFeedback(null); }}>
-                  Sıfırla
+                  onClick={resetPattern} disabled={!connected}>
+                  Reset
                 </button>
               </div>
 
@@ -379,9 +456,9 @@ export default function App() {
               )}
             </div>
 
-            {/* Sağ: canlı görsel */}
+            {/* Right: live preview */}
             <div className="bit-live-preview">
-              <div className="bit-live-label">ÖNİZLEME</div>
+              <div className="bit-live-label">PREVIEW</div>
               <div className="bit-preview-leds">
                 {Array(NUM_LEDS).fill(null).map((_,i) => (
                   <div key={i}
@@ -393,7 +470,7 @@ export default function App() {
                 ))}
               </div>
               <div className="bit-preview-meta">
-                Editördeki pattern · tıkla → toggle
+                Editor pattern · click → toggle
               </div>
               <div className="bit-preview-meta" style={{marginTop:4}}>
                 {Array(NUM_LEDS).fill(null).map((_,i) => (
@@ -410,9 +487,9 @@ export default function App() {
           </div>
         </div>
 
-        {/* ── SİSTEM DURUMU ─────────────────────────────────────────────── */}
+        {/* ── SYSTEM STATUS ─────────────────────────────────────────────── */}
         <div className="card stats-card">
-          <div className="card-label">SİSTEM DURUMU</div>
+          <div className="card-label">SYSTEM STATUS</div>
           <div className="stat-grid">
             <div className="stat">
               <div className="stat-val" style={{color: connected?"#00ff88":"#ff4455"}}>
@@ -422,42 +499,46 @@ export default function App() {
             </div>
             <div className="stat">
               <div className="stat-val" style={{color:"var(--warn)"}}>{onCount}/8</div>
-              <div className="stat-label">LED Açık</div>
+              <div className="stat-label">LEDs On</div>
             </div>
             <div className="stat">
               <div className="stat-val" style={{color:"var(--accent2)"}}>
                 {Math.round(brightness/2.55)}%
               </div>
-              <div className="stat-label">Parlaklık</div>
+              <div className="stat-label">Brightness</div>
             </div>
             <div className="stat">
               <div className="stat-val" style={{color: allOn?"var(--accent)":"#666"}}>
                 {allOn ? "ON" : "PTN"}
               </div>
-              <div className="stat-label">Mod</div>
+              <div className="stat-label">Mode</div>
             </div>
             <div className="stat" style={{gridColumn:"1/-1"}}>
               <div className="stat-val" style={{fontSize:18, letterSpacing:6, color:"var(--warn)"}}>
                 {activePattern}
               </div>
-              <div className="stat-label">Aktif Pattern</div>
+              <div className="stat-label">Active Pattern</div>
             </div>
           </div>
         </div>
 
-        {/* ── LOG ───────────────────────────────────────────────────────── */}
+        {/* ── EVENT LOG ─────────────────────────────────────────────────── */}
         <div className="card log-card">
           <div className="log-header">
             <div className="card-label" style={{margin:0}}>EVENT LOG</div>
             <div style={{display:"flex", gap:6, alignItems:"center"}}>
               <div className="log-tabs">
                 <button className={`log-tab ${logTab==="ui"?"tab-active":""}`}
-                  onClick={()=>setLogTab("ui")}>Arayüz</button>
+                  onClick={()=>setLogTab("ui")}>UI</button>
                 <button className={`log-tab ${logTab==="esp32"?"tab-active":""}`}
                   onClick={()=>setLogTab("esp32")}>ESP32</button>
               </div>
-              {logTab==="esp32" && (
-                <button className="log-icon-btn" onClick={downloadLog} title="Log indir">⬇</button>
+              {logTab === "ui" && (
+                <button className="log-icon-btn" onClick={downloadUiLog}
+                  title="Download UI log" disabled={uiLogs.length === 0}>⬇</button>
+              )}
+              {logTab === "esp32" && (
+                <button className="log-icon-btn" onClick={downloadLog} title="Download ESP32 log">⬇</button>
               )}
             </div>
           </div>
@@ -465,19 +546,19 @@ export default function App() {
           {logTab === "ui" ? (
             <div className="log-list">
               {uiLogs.length === 0
-                ? <div className="log-empty">Henüz event yok...</div>
+                ? <div className="log-empty">No events yet...</div>
                 : uiLogs.map((l,i) => <div key={i} className="log-line">{l}</div>)}
             </div>
           ) : (
             <>
               <div className="log-list">
                 {serverLog.trim() === ""
-                  ? <div className="log-empty">Log dosyası boş...</div>
+                  ? <div className="log-empty">Log file is empty...</div>
                   : serverLog.trim().split("\n").reverse().map((l,i) =>
                       <div key={i} className="log-line">{l}</div>)}
               </div>
               <button className="log-clear-btn" onClick={clearServerLog}>
-                Log Dosyasını Temizle
+                Clear Log File
               </button>
             </>
           )}
